@@ -1,0 +1,2 @@
+RewriteRule ^$ https://zenodo.org/record/[YOUR_ZENODO_ID]/files/01_YLQ-Onto.ttl [R=302,L]
+RewriteRule ^(.*)$ https://zenodo.org/record/[YOUR_ZENODO_ID]/files/01_YLQ-Onto.ttl#$1 [R=302,L]
