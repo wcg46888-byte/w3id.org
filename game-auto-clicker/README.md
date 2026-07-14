@@ -16,6 +16,18 @@
 
 ## 构建方法
 
+### 方式一：不用 Android Studio（Linux 一键打包）
+
+```bash
+sudo apt-get install -y aapt zipalign apksigner dalvik-exchange default-jdk-headless
+./build-apk.sh
+# APK 输出位置: build/AutoClicker-debug.apk
+```
+
+脚本会自动下载 android.jar 和 Kotlin 编译器，用 aapt + dx + apksigner 完成编译、打包和签名，全程无需 Android Studio / Gradle / Android SDK。
+
+### 方式二：Android Studio
+
 用 **Android Studio** 打开本目录（`game-auto-clicker/`），等待 Gradle 同步完成后直接运行，或执行：
 
 ```bash
