@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">游戏连点器</string>
+    <string name="accessibility_label">游戏连点器（点击服务）</string>
+    <string name="accessibility_desc">连点器需要无障碍服务权限来模拟屏幕点击。开启后可通过悬浮面板在屏幕上设置多个点击位置，并按设定的间隔依次自动点按。本应用不读取屏幕内容。</string>
+
+    <string name="main_title">游戏连点器</string>
+    <string name="main_steps">使用步骤：\n\n1️⃣ 点击下方按钮，前往系统设置开启本应用的「无障碍服务」\n\n2️⃣ 返回本应用，点击「显示悬浮面板」\n\n3️⃣ 切换到游戏中，用悬浮面板上的 ➕ 添加点击位置（可拖动编号圆点到目标处，按编号顺序依次点击）\n\n4️⃣ 轻点某个编号圆点，可单独设置该点的「点击次数、连点间隔、点完后延迟」；点 ⚙ 设置全局参数（按压时长、随机抖动、循环轮数）\n\n5️⃣ 点 ▶ 开始 / ⏸ 停止</string>
+    <string name="status_service_on">无障碍服务：已开启 ✅</string>
+    <string name="status_service_off">无障碍服务：未开启 ❌（请先开启）</string>
+    <string name="btn_open_accessibility">① 打开无障碍设置</string>
+    <string name="btn_toggle_panel">② 显示 / 隐藏悬浮面板</string>
+    <string name="toast_need_service">请先在系统设置中开启无障碍服务</string>
+    <string name="warning_note">⚠️ 提示：部分网络游戏禁止使用自动点击工具，可能导致账号处罚，请仅在单机或允许的场景下使用。</string>
+</resources>
