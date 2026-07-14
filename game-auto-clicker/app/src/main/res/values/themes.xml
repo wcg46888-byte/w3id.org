@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.AutoClicker" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#304FFE</item>
+        <item name="android:colorPrimaryDark">#1A237E</item>
+        <item name="android:colorAccent">#FF4081</item>
+        <item name="android:statusBarColor">#1A237E</item>
+    </style>
+</resources>
