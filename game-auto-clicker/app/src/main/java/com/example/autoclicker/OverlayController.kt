@@ -19,11 +19,25 @@ import android.widget.Toast
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
+/** 单个点位的独立配置 */
+class PointConfig(
+    /** 每轮到该点时连续点击的次数 */
+    var tapCount: Int = 1,
+    /** 该点内部连点的间隔（毫秒），tapCount > 1 时生效 */
+    var tapIntervalMs: Long = 100L,
+    /** 点完该点后、移动到下一个点前的延迟（毫秒） */
+    var delayMs: Long = 500L
+)
+
+/** 点位 = 悬浮标记视图 + 独立配置 */
+class MarkerItem(val view: TextView, val config: PointConfig)
+
 /**
  * 悬浮层控制器：
- *  - 悬浮控制面板（拖动柄 / 加减点位 / 开始暂停 / 设置 / 收起）
- *  - 可拖动的编号点位标记，按编号顺序循环点击
- *  - 设置弹窗（间隔、按压时长、随机抖动、循环次数）
+ *  - 悬浮控制面板（拖动柄 / 加减点位 / 开始暂停 / 全局设置 / 收起）
+ *  - 可拖动的编号点位标记，按编号顺序循环点击；轻点标记可单独设置
+ *    该点的点击次数、连点间隔和点完后延迟
+ *  - 全局设置（按压时长、随机抖动、循环轮数、新点位默认延迟）
  * 点位与设置通过 SharedPreferences 持久化。
  */
 class OverlayController(private val service: AutoClickService) {
@@ -35,18 +49,19 @@ class OverlayController(private val service: AutoClickService) {
     private var panel: LinearLayout? = null
     private lateinit var playBtn: TextView
     private lateinit var countLabel: TextView
-    private val markers = mutableListOf<TextView>()
-    private var settingsView: View? = null
+    private val items = mutableListOf<MarkerItem>()
+    private var dialogView: View? = null
 
-    // ---- 运行参数（可在设置弹窗中修改）----
-    private var intervalMs = prefs.getLong("interval", 500L)   // 两次点击之间的间隔
-    private var tapDurationMs = prefs.getLong("duration", 30L) // 每次按压时长
-    private var jitterMs = prefs.getLong("jitter", 0L)         // 间隔随机抖动 ±ms
-    private var loopCount = prefs.getInt("loops", 0)           // 循环轮数，0 = 无限
+    // ---- 全局参数 ----
+    private var defaultDelayMs = prefs.getLong("interval", 500L)  // 新点位的默认“点完后延迟”
+    private var tapDurationMs = prefs.getLong("duration", 30L)    // 每次按压时长
+    private var jitterMs = prefs.getLong("jitter", 0L)            // 延迟随机抖动 ±ms
+    private var loopCount = prefs.getInt("loops", 0)              // 循环轮数，0 = 无限
 
     var running = false
         private set
-    private var index = 0
+    private var pointIndex = 0
+    private var tapWithinPoint = 0
     private var loopsLeft = 0
 
     private val markerSizePx = dp(44)
@@ -79,7 +94,7 @@ class OverlayController(private val service: AutoClickService) {
         val addBtn = panelButton("➕") { addMarkerAtCenter() }
         val removeBtn = panelButton("➖") { removeLastMarker() }
         playBtn = panelButton("▶") { if (running) stopClicking() else startClicking() }
-        val settingsBtn = panelButton("⚙") { showSettings() }
+        val settingsBtn = panelButton("⚙") { showGlobalSettings() }
         val closeBtn = panelButton("✕") { hidePanel() }
 
         countLabel = TextView(ctx).apply {
@@ -107,8 +122,7 @@ class OverlayController(private val service: AutoClickService) {
         removeAllMarkerViews()
         panel?.let { runCatching { wm.removeView(it) } }
         panel = null
-        settingsView?.let { runCatching { wm.removeView(it) } }
-        settingsView = null
+        dismissDialog()
     }
 
     fun togglePanel() {
@@ -128,7 +142,7 @@ class OverlayController(private val service: AutoClickService) {
         }
 
     private fun updateCountLabel() {
-        if (::countLabel.isInitialized) countLabel.text = "${markers.size}点"
+        if (::countLabel.isInitialized) countLabel.text = "${items.size}点"
     }
 
     // ==================== 点位标记 ====================
@@ -136,14 +150,18 @@ class OverlayController(private val service: AutoClickService) {
     /** 在屏幕中央附近添加一个新点位（略微错开，避免完全重叠） */
     private fun addMarkerAtCenter() {
         val dm = service.resources.displayMetrics
-        val offset = dp(28) * markers.size
-        addMarker(dm.widthPixels / 2 + offset % dp(112), dm.heightPixels / 2 + offset % dp(112))
+        val offset = dp(28) * items.size
+        addMarker(
+            dm.widthPixels / 2 + offset % dp(112),
+            dm.heightPixels / 2 + offset % dp(112),
+            PointConfig(delayMs = defaultDelayMs)
+        )
         saveMarkers()
     }
 
-    private fun addMarker(centerX: Int, centerY: Int) {
+    private fun addMarker(centerX: Int, centerY: Int, config: PointConfig) {
         val marker = TextView(service).apply {
-            text = (markers.size + 1).toString()
+            text = (items.size + 1).toString()
             textSize = 16f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
@@ -158,61 +176,83 @@ class OverlayController(private val service: AutoClickService) {
             x = centerX - markerSizePx / 2
             y = centerY - markerSizePx / 2
         }
+        val item = MarkerItem(marker, config)
+        // 轻点标记打开该点的单独设置
+        marker.setOnClickListener { showPointSettings(item) }
         makeDraggable(marker, marker, onDragEnd = { saveMarkers() }) { lp }
         wm.addView(marker, lp)
-        markers.add(marker)
+        items.add(item)
         updateCountLabel()
     }
 
     private fun removeLastMarker() {
-        val last = markers.removeLastOrNull() ?: return
-        runCatching { wm.removeView(last) }
+        val last = items.removeLastOrNull() ?: return
+        runCatching { wm.removeView(last.view) }
         saveMarkers()
         updateCountLabel()
     }
 
+    private fun removeMarker(item: MarkerItem) {
+        if (!items.remove(item)) return
+        runCatching { wm.removeView(item.view) }
+        renumberMarkers()
+        saveMarkers()
+        updateCountLabel()
+    }
+
+    private fun renumberMarkers() {
+        items.forEachIndexed { i, it -> it.view.text = (i + 1).toString() }
+    }
+
     private fun removeAllMarkerViews() {
-        markers.forEach { runCatching { wm.removeView(it) } }
-        markers.clear()
+        items.forEach { runCatching { wm.removeView(it.view) } }
+        items.clear()
         updateCountLabel()
     }
 
     /** 运行时把标记设为不可触摸并半透明，让注入的点击穿透到游戏 */
     private fun setMarkersClickThrough(clickThrough: Boolean) {
-        markers.forEach { m ->
-            val lp = m.layoutParams as WindowManager.LayoutParams
+        items.forEach { item ->
+            val lp = item.view.layoutParams as WindowManager.LayoutParams
             lp.flags = if (clickThrough) {
                 lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
             } else {
                 lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
             }
-            m.alpha = if (clickThrough) 0.35f else 1f
-            runCatching { wm.updateViewLayout(m, lp) }
+            item.view.alpha = if (clickThrough) 0.35f else 1f
+            runCatching { wm.updateViewLayout(item.view, lp) }
         }
     }
 
-    private fun markerCenter(m: View): Pair<Float, Float> {
-        val lp = m.layoutParams as WindowManager.LayoutParams
+    private fun markerCenter(v: View): Pair<Float, Float> {
+        val lp = v.layoutParams as WindowManager.LayoutParams
         return (lp.x + markerSizePx / 2f) to (lp.y + markerSizePx / 2f)
     }
 
     // ---- 持久化 ----
+    // 格式: x,y,tapCount,tapIntervalMs,delayMs | x,y,... （兼容旧版 x,y 格式）
 
     private fun saveMarkers() {
-        val s = markers.joinToString("|") { m ->
-            val (cx, cy) = markerCenter(m)
-            "${cx.roundToInt()},${cy.roundToInt()}"
+        val s = items.joinToString("|") { item ->
+            val (cx, cy) = markerCenter(item.view)
+            val c = item.config
+            "${cx.roundToInt()},${cy.roundToInt()},${c.tapCount},${c.tapIntervalMs},${c.delayMs}"
         }
         prefs.edit().putString("points", s).apply()
     }
 
     private fun restoreMarkers() {
         val s = prefs.getString("points", null)?.takeIf { it.isNotBlank() } ?: return
-        s.split("|").forEach { pair ->
-            val xy = pair.split(",")
-            val x = xy.getOrNull(0)?.toIntOrNull() ?: return@forEach
-            val y = xy.getOrNull(1)?.toIntOrNull() ?: return@forEach
-            addMarker(x, y)
+        s.split("|").forEach { entry ->
+            val p = entry.split(",")
+            val x = p.getOrNull(0)?.toIntOrNull() ?: return@forEach
+            val y = p.getOrNull(1)?.toIntOrNull() ?: return@forEach
+            val config = PointConfig(
+                tapCount = (p.getOrNull(2)?.toIntOrNull() ?: 1).coerceIn(1, 10_000),
+                tapIntervalMs = (p.getOrNull(3)?.toLongOrNull() ?: 100L).coerceIn(20, 3_600_000),
+                delayMs = (p.getOrNull(4)?.toLongOrNull() ?: defaultDelayMs).coerceIn(20, 3_600_000)
+            )
+            addMarker(x, y, config)
         }
     }
 
@@ -220,13 +260,15 @@ class OverlayController(private val service: AutoClickService) {
 
     fun startClicking() {
         if (running) return
-        if (markers.isEmpty()) {
+        if (items.isEmpty()) {
             toast("请先用 ➕ 添加点击位置")
             return
         }
         running = true
-        index = 0
+        pointIndex = 0
+        tapWithinPoint = 0
         loopsLeft = loopCount
+        dismissDialog()
         setMarkersClickThrough(true)
         playBtn.text = "⏸"
         handler.post(tick)
@@ -242,96 +284,85 @@ class OverlayController(private val service: AutoClickService) {
 
     private val tick: Runnable = object : Runnable {
         override fun run() {
-            if (!running || markers.isEmpty()) return
-            val m = markers[index % markers.size]
-            val (cx, cy) = markerCenter(m)
+            if (!running || items.isEmpty()) return
+            if (pointIndex >= items.size) pointIndex = 0
+            val item = items[pointIndex]
+            val (cx, cy) = markerCenter(item.view)
             service.tap(cx, cy, tapDurationMs) {
                 if (!running) return@tap
-                index++
-                if (index >= markers.size) {
-                    index = 0
-                    if (loopCount > 0 && --loopsLeft <= 0) {
-                        stopClicking()
-                        toast("已完成 $loopCount 轮点击")
-                        return@tap
+                val cfg = item.config
+                tapWithinPoint++
+                var delay: Long
+                if (tapWithinPoint < cfg.tapCount) {
+                    // 同一个点还没点够次数：用该点的连点间隔
+                    delay = cfg.tapIntervalMs
+                } else {
+                    // 该点完成，进入下一个点：用该点的“点完后延迟”
+                    tapWithinPoint = 0
+                    pointIndex++
+                    if (pointIndex >= items.size) {
+                        pointIndex = 0
+                        if (loopCount > 0 && --loopsLeft <= 0) {
+                            stopClicking()
+                            toast("已完成 $loopCount 轮点击")
+                            return@tap
+                        }
                     }
+                    delay = cfg.delayMs
                 }
-                val jitter = if (jitterMs > 0) Random.nextLong(-jitterMs, jitterMs + 1) else 0L
-                val delay = (intervalMs + jitter).coerceAtLeast(tapDurationMs + 10)
-                handler.postDelayed(this, delay)
+                if (jitterMs > 0) delay += Random.nextLong(-jitterMs, jitterMs + 1)
+                handler.postDelayed(this, delay.coerceAtLeast(tapDurationMs + 5))
             }
         }
     }
 
     // ==================== 设置弹窗 ====================
 
-    private fun showSettings() {
-        if (settingsView != null) return
-        stopClicking()
+    private fun makeRow(label: String, value: String): Pair<LinearLayout, EditText> {
         val ctx = service
-
-        fun row(label: String, value: String): Pair<LinearLayout, EditText> {
-            val edit = EditText(ctx).apply {
-                inputType = InputType.TYPE_CLASS_NUMBER
-                setText(value)
+        val edit = EditText(ctx).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(value)
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            minWidth = dp(90)
+        }
+        val rowView = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(ctx).apply {
+                text = label
                 setTextColor(Color.WHITE)
                 textSize = 14f
-                minWidth = dp(90)
-            }
-            val rowView = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(TextView(ctx).apply {
-                    text = label
-                    setTextColor(Color.WHITE)
-                    textSize = 14f
-                    minWidth = dp(150)
-                })
-                addView(edit)
-            }
-            return rowView to edit
+                minWidth = dp(150)
+            })
+            addView(edit)
         }
+        return rowView to edit
+    }
 
-        val (r1, intervalEdit) = row("点击间隔 (毫秒)", intervalMs.toString())
-        val (r2, durationEdit) = row("按压时长 (毫秒)", tapDurationMs.toString())
-        val (r3, jitterEdit) = row("随机抖动 ±(毫秒)", jitterMs.toString())
-        val (r4, loopsEdit) = row("循环轮数 (0=无限)", loopCount.toString())
-
-        val buttons = LinearLayout(ctx).apply {
+    private fun showDialog(title: String, rows: List<View>, buttons: List<View>) {
+        dismissDialog()
+        val ctx = service
+        val buttonRow = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
-            addView(panelButton("取消") { dismissSettings() })
-            addView(panelButton("保存") {
-                intervalMs = (intervalEdit.text.toString().toLongOrNull() ?: intervalMs).coerceIn(20, 3_600_000)
-                tapDurationMs = (durationEdit.text.toString().toLongOrNull() ?: tapDurationMs).coerceIn(1, 5_000)
-                jitterMs = (jitterEdit.text.toString().toLongOrNull() ?: jitterMs).coerceIn(0, 10_000)
-                loopCount = (loopsEdit.text.toString().toIntOrNull() ?: loopCount).coerceIn(0, 1_000_000)
-                prefs.edit()
-                    .putLong("interval", intervalMs)
-                    .putLong("duration", tapDurationMs)
-                    .putLong("jitter", jitterMs)
-                    .putInt("loops", loopCount)
-                    .apply()
-                dismissSettings()
-                toast("设置已保存")
-            })
+            buttons.forEach { addView(it) }
         }
-
         val dialog = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             background = roundedBg(Color.parseColor("#EE263238"), dp(14).toFloat())
             setPadding(dp(18), dp(14), dp(18), dp(10))
             addView(TextView(ctx).apply {
-                text = "连点设置"
+                text = title
                 setTextColor(Color.WHITE)
                 textSize = 16f
                 typeface = Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, dp(6))
             })
-            addView(r1); addView(r2); addView(r3); addView(r4)
-            addView(buttons)
+            rows.forEach { addView(it) }
+            addView(buttonRow)
         }
-
         // 设置窗口需要可获取焦点，才能弹出输入法
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -343,14 +374,75 @@ class OverlayController(private val service: AutoClickService) {
             gravity = Gravity.CENTER
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
         }
-
         wm.addView(dialog, lp)
-        settingsView = dialog
+        dialogView = dialog
     }
 
-    private fun dismissSettings() {
-        settingsView?.let { runCatching { wm.removeView(it) } }
-        settingsView = null
+    private fun dismissDialog() {
+        dialogView?.let { runCatching { wm.removeView(it) } }
+        dialogView = null
+    }
+
+    /** 全局设置：按压时长、抖动、循环轮数、新点位默认延迟 */
+    private fun showGlobalSettings() {
+        stopClicking()
+        val (r1, delayEdit) = makeRow("新点位默认延迟 (毫秒)", defaultDelayMs.toString())
+        val (r2, durationEdit) = makeRow("按压时长 (毫秒)", tapDurationMs.toString())
+        val (r3, jitterEdit) = makeRow("随机抖动 ±(毫秒)", jitterMs.toString())
+        val (r4, loopsEdit) = makeRow("循环轮数 (0=无限)", loopCount.toString())
+
+        showDialog(
+            "全局设置（轻点圆点可单独设置每个点）",
+            listOf(r1, r2, r3, r4),
+            listOf(
+                panelButton("取消") { dismissDialog() },
+                panelButton("保存") {
+                    defaultDelayMs = (delayEdit.text.toString().toLongOrNull() ?: defaultDelayMs).coerceIn(20, 3_600_000)
+                    tapDurationMs = (durationEdit.text.toString().toLongOrNull() ?: tapDurationMs).coerceIn(1, 5_000)
+                    jitterMs = (jitterEdit.text.toString().toLongOrNull() ?: jitterMs).coerceIn(0, 10_000)
+                    loopCount = (loopsEdit.text.toString().toIntOrNull() ?: loopCount).coerceIn(0, 1_000_000)
+                    prefs.edit()
+                        .putLong("interval", defaultDelayMs)
+                        .putLong("duration", tapDurationMs)
+                        .putLong("jitter", jitterMs)
+                        .putInt("loops", loopCount)
+                        .apply()
+                    dismissDialog()
+                    toast("全局设置已保存")
+                }
+            )
+        )
+    }
+
+    /** 单个点位设置：点击次数、连点间隔、点完后延迟 */
+    private fun showPointSettings(item: MarkerItem) {
+        if (running) return
+        val num = items.indexOf(item) + 1
+        val c = item.config
+        val (r1, countEdit) = makeRow("点击次数 (每轮)", c.tapCount.toString())
+        val (r2, intervalEdit) = makeRow("连点间隔 (毫秒)", c.tapIntervalMs.toString())
+        val (r3, delayEdit) = makeRow("点完后延迟 (毫秒)", c.delayMs.toString())
+
+        showDialog(
+            "点位 $num 设置",
+            listOf(r1, r2, r3),
+            listOf(
+                panelButton("删除") {
+                    dismissDialog()
+                    removeMarker(item)
+                    toast("已删除点位 $num")
+                },
+                panelButton("取消") { dismissDialog() },
+                panelButton("保存") {
+                    c.tapCount = (countEdit.text.toString().toIntOrNull() ?: c.tapCount).coerceIn(1, 10_000)
+                    c.tapIntervalMs = (intervalEdit.text.toString().toLongOrNull() ?: c.tapIntervalMs).coerceIn(20, 3_600_000)
+                    c.delayMs = (delayEdit.text.toString().toLongOrNull() ?: c.delayMs).coerceIn(20, 3_600_000)
+                    saveMarkers()
+                    dismissDialog()
+                    toast("点位 $num 设置已保存")
+                }
+            )
+        )
     }
 
     // ==================== 工具方法 ====================
