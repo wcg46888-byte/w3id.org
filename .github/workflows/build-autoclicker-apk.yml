@@ -1,0 +1,61 @@
+name: Build AutoClicker APK
+
+on:
+  push:
+    branches:
+      - claude/mobile-game-auto-clicker-hpnopx
+    paths:
+      - "android-autoclicker/**"
+      - ".github/workflows/build-autoclicker-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-autoclicker
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Rename APK
+        run: |
+          mkdir -p ../out
+          cp app/build/outputs/apk/debug/app-debug.apk ../out/autoclicker-debug.apk
+          ls -la ../out
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoclicker-debug-apk
+          path: out/autoclicker-debug.apk
+
+      - name: Publish Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: autoclicker-build-${{ github.run_number }}
+          name: AutoClicker APK (build ${{ github.run_number }})
+          body: |
+            火炬之光:无限 拾取连点器 debug 版 APK。
+            由 GitHub Actions 自动编译。安装后按 README 校准坐标与颜色即可使用。
+          files: out/autoclicker-debug.apk
